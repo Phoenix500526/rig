@@ -21,7 +21,7 @@ use crate::{
     json_utils,
     message::{AssistantContent, ToolChoice, ToolResultContent, UserContent},
     tool::server::ToolServerHandle,
-    wasm_compat::{WasmBoxedFuture, WasmCompatSend},
+    wasm_compat::{WasmBoxedFuture, WasmCompatSend, WasmCompatSync},
 };
 
 use super::{
@@ -44,11 +44,12 @@ impl PromptType for Extended {}
 /// attempting to await (which will send the prompt request) can potentially return
 /// [`crate::completion::request::PromptError::MaxTurnsError`] if the agent decides to call tools
 /// back to back.
-pub struct PromptRequest<'a, S, M, P>
+pub struct PromptRequest<'a, S, M, P, R = ()>
 where
     S: PromptType,
     M: CompletionModel,
     P: PromptHook<M>,
+    R: ToolResultReviewer,
 {
     /// The prompt message to send to the model
     prompt: Message,
@@ -88,9 +89,11 @@ where
     concurrency: usize,
     /// Optional JSON Schema for structured output
     output_schema: Option<schemars::Schema>,
+    /// Optional reviewer for critiquing tool execution results
+    reviewer: Option<R>,
 }
 
-impl<'a, M, P> PromptRequest<'a, Standard, M, P>
+impl<'a, M, P> PromptRequest<'a, Standard, M, P, ()>
 where
     M: CompletionModel,
     P: PromptHook<M>,
@@ -115,22 +118,24 @@ where
             hook: agent.hook.clone(),
             concurrency: 1,
             output_schema: agent.output_schema.clone(),
+            reviewer: None,
         }
     }
 }
 
-impl<'a, S, M, P> PromptRequest<'a, S, M, P>
+impl<'a, S, M, P, R> PromptRequest<'a, S, M, P, R>
 where
     S: PromptType,
     M: CompletionModel,
     P: PromptHook<M>,
+    R: ToolResultReviewer,
 {
     /// Enable returning extended details for responses (includes aggregated token usage)
     ///
     /// Note: This changes the type of the response from `.send` to return a `PromptResponse` struct
     /// instead of a simple `String`. This is useful for tracking token usage across multiple turns
     /// of conversation.
-    pub fn extended_details(self) -> PromptRequest<'a, Extended, M, P> {
+    pub fn extended_details(self) -> PromptRequest<'a, Extended, M, P, R> {
         PromptRequest {
             prompt: self.prompt,
             chat_history: self.chat_history,
@@ -149,6 +154,7 @@ where
             hook: self.hook,
             concurrency: self.concurrency,
             output_schema: self.output_schema,
+            reviewer: self.reviewer,
         }
     }
 
@@ -174,7 +180,7 @@ where
 
     /// Attach a per-request hook for tool call events.
     /// This overrides any default hook set on the agent.
-    pub fn with_hook<P2>(self, hook: P2) -> PromptRequest<'a, S, M, P2>
+    pub fn with_hook<P2>(self, hook: P2) -> PromptRequest<'a, S, M, P2, R>
     where
         P2: PromptHook<M>,
     {
@@ -196,17 +202,90 @@ where
             hook: Some(hook),
             concurrency: self.concurrency,
             output_schema: self.output_schema,
+            reviewer: self.reviewer,
+        }
+    }
+
+    /// Attach a reviewer to critique tool execution results.
+    ///
+    /// The reviewer's `critique()` method will be called after successful tool execution.
+    /// The returned string will be used as the final tool result.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let response = agent
+    ///     .prompt("List files")
+    ///     .with_reviewer(my_reviewer)
+    ///     .await?;
+    /// ```
+    pub fn with_reviewer<R2>(self, reviewer: R2) -> PromptRequest<'a, S, M, P, R2>
+    where
+        R2: ToolResultReviewer,
+    {
+        PromptRequest {
+            prompt: self.prompt,
+            chat_history: self.chat_history,
+            max_turns: self.max_turns,
+            model: self.model,
+            agent_name: self.agent_name,
+            preamble: self.preamble,
+            static_context: self.static_context,
+            temperature: self.temperature,
+            max_tokens: self.max_tokens,
+            additional_params: self.additional_params,
+            tool_server_handle: self.tool_server_handle,
+            dynamic_context: self.dynamic_context,
+            tool_choice: self.tool_choice,
+            state: PhantomData,
+            hook: self.hook,
+            concurrency: self.concurrency,
+            output_schema: self.output_schema,
+            reviewer: Some(reviewer),
         }
     }
 }
 
+/// Trait for reviewing/critiquing tool execution results.
+///
+/// This trait allows you to implement custom logic to evaluate tool execution results,
+/// such as using a smaller model to critique whether the result achieves the intended goal.
+pub trait ToolResultReviewer: Clone + WasmCompatSend + WasmCompatSync {
+    /// Critique a tool execution result and return the final output.
+    ///
+    /// This method is called after successful tool execution. The returned string
+    /// will be used as the tool result sent back to the LLM.
+    ///
+    /// # Arguments
+    /// * `tool_name` - The name of the tool that was executed
+    /// * `tool_call_id` - Optional call ID for the tool invocation
+    /// * `args` - The JSON string of arguments passed to the tool
+    /// * `result` - The result returned by the tool
+    ///
+    /// # Returns
+    /// The final output to use. Default implementation returns `result` unchanged.
+    #[allow(unused_variables)]
+    fn critique(
+        &self,
+        tool_name: &str,
+        tool_call_id: Option<String>,
+        args: &str,
+        result: &str,
+    ) -> impl Future<Output = String> + WasmCompatSend {
+        let result = result.to_string();
+        async { result }
+    }
+}
+
+impl ToolResultReviewer for () {}
+
 /// Due to: [RFC 2515](https://github.com/rust-lang/rust/issues/63063), we have to use a `BoxFuture`
 ///  for the `IntoFuture` implementation. In the future, we should be able to use `impl Future<...>`
 ///  directly via the associated type.
-impl<'a, M, P> IntoFuture for PromptRequest<'a, Standard, M, P>
+impl<'a, M, P, R> IntoFuture for PromptRequest<'a, Standard, M, P, R>
 where
     M: CompletionModel + 'a,
     P: PromptHook<M> + 'static,
+    R: ToolResultReviewer + 'static,
 {
     type Output = Result<String, PromptError>;
     type IntoFuture = WasmBoxedFuture<'a, Self::Output>; // This future should not outlive the agent
@@ -216,10 +295,11 @@ where
     }
 }
 
-impl<'a, M, P> IntoFuture for PromptRequest<'a, Extended, M, P>
+impl<'a, M, P, R> IntoFuture for PromptRequest<'a, Extended, M, P, R>
 where
     M: CompletionModel + 'a,
     P: PromptHook<M> + 'static,
+    R: ToolResultReviewer + 'static,
 {
     type Output = Result<PromptResponse, PromptError>;
     type IntoFuture = WasmBoxedFuture<'a, Self::Output>; // This future should not outlive the agent
@@ -229,10 +309,11 @@ where
     }
 }
 
-impl<M, P> PromptRequest<'_, Standard, M, P>
+impl<M, P, R> PromptRequest<'_, Standard, M, P, R>
 where
     M: CompletionModel,
     P: PromptHook<M>,
+    R: ToolResultReviewer,
 {
     async fn send(self) -> Result<String, PromptError> {
         self.extended_details().send().await.map(|resp| resp.output)
@@ -256,10 +337,11 @@ impl PromptResponse {
 
 const UNKNOWN_AGENT_NAME: &str = "Unnamed Agent";
 
-impl<M, P> PromptRequest<'_, Extended, M, P>
+impl<M, P, R> PromptRequest<'_, Extended, M, P, R>
 where
     M: CompletionModel,
     P: PromptHook<M>,
+    R: ToolResultReviewer,
 {
     fn agent_name(&self) -> &str {
         self.agent_name.as_deref().unwrap_or(UNKNOWN_AGENT_NAME)
@@ -422,6 +504,7 @@ where
 
             let hook = self.hook.clone();
             let tool_server_handle = self.tool_server_handle.clone();
+            let reviewer = self.reviewer.clone();
 
             let tool_calls: Vec<AssistantContent> = tool_calls.into_iter().cloned().collect();
             let tool_content = stream::iter(tool_calls)
@@ -429,6 +512,7 @@ where
                     let hook1 = hook.clone();
                     let hook2 = hook.clone();
                     let tool_server_handle = tool_server_handle.clone();
+                    let reviewer = reviewer.clone();
 
                     let tool_span = info_span!(
                         "execute_tool",
@@ -501,14 +585,30 @@ where
                                     }
                                 }
                             }
-                            let output = match tool_server_handle.call_tool(tool_name, &args).await
-                            {
-                                Ok(res) => res,
-                                Err(e) => {
-                                    tracing::warn!("Error while executing tool: {e}");
-                                    e.to_string()
+                            // Execute tool and track success/failure status
+                            let (output, tool_succeeded) =
+                                match tool_server_handle.call_tool(tool_name, &args).await {
+                                    Ok(res) => (res, true),
+                                    Err(e) => {
+                                        tracing::warn!("Error while executing tool: {e}");
+                                        (e.to_string(), false)
+                                    }
+                                };
+                            // Only critique when tool execution succeeds
+                            let final_output = match (tool_succeeded, &reviewer) {
+                                (true, Some(reviewer)) => {
+                                    reviewer
+                                        .critique(
+                                            tool_name,
+                                            tool_call.call_id.clone(),
+                                            &args,
+                                            &output,
+                                        )
+                                        .await
                                 }
+                                _ => output,
                             };
+                            // on_tool_result sees the final output (including critique if any)
                             if let Some(hook) = hook2
                                 && let HookAction::Terminate { reason } = hook
                                     .on_tool_result(
@@ -516,7 +616,7 @@ where
                                         tool_call.call_id.clone(),
                                         &internal_call_id,
                                         &args,
-                                        &output.to_string(),
+                                        &final_output,
                                     )
                                     .await
                             {
@@ -526,20 +626,20 @@ where
                                 ));
                             }
 
-                            tool_span.record("gen_ai.tool.call.result", &output);
+                            tool_span.record("gen_ai.tool.call.result", &final_output);
                             tracing::info!(
-                                "executed tool {tool_name} with args {args}. result: {output}"
+                                "executed tool {tool_name} with args {args}. result: {final_output}"
                             );
                             if let Some(call_id) = tool_call.call_id.clone() {
                                 Ok(UserContent::tool_result_with_call_id(
                                     tool_call.id.clone(),
                                     call_id,
-                                    ToolResultContent::from_tool_output(output),
+                                    ToolResultContent::from_tool_output(final_output),
                                 ))
                             } else {
                                 Ok(UserContent::tool_result(
                                     tool_call.id.clone(),
-                                    ToolResultContent::from_tool_output(output),
+                                    ToolResultContent::from_tool_output(final_output),
                                 ))
                             }
                         } else {
