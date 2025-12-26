@@ -300,9 +300,21 @@ where
                                 let tool_span = tracing::Span::current();
                                 let tool_args = json_utils::value_to_json_string(&tool_call.function.arguments);
                                 if let Some(ref hook) = self.hook {
-                                    hook.on_tool_call(&tool_call.function.name, tool_call.call_id.clone(), &tool_args, cancel_signal.clone()).await;
-                                    if cancel_signal.is_cancelled() {
-                                        return Err(StreamingError::Prompt(PromptError::prompt_cancelled(chat_history.read().await.to_vec()).into()));
+                                    match hook.on_tool_call(&tool_call.function.name, tool_call.call_id.clone(), &tool_args, cancel_signal.clone()).await {
+                                        Ok(()) => {
+                                            if cancel_signal.is_cancelled() {
+                                                return Err(StreamingError::Prompt(PromptError::prompt_cancelled(chat_history.read().await.to_vec()).into()));
+                                            }
+                                        }
+                                        Err(rejection_message) => {
+                                            // Tool execution rejected, return rejection message as tool result
+                                            tracing::info!("Tool {} rejected: {rejection_message}", &tool_call.function.name);
+                                            let tool_call_msg = AssistantContent::ToolCall(tool_call.clone());
+                                            tool_calls.push(tool_call_msg);
+                                            tool_results.push((tool_call.id.clone(), tool_call.call_id.clone(), rejection_message.clone()));
+                                            did_call_tool = true;
+                                            return Ok(rejection_message);
+                                        }
                                     }
                                 }
 
@@ -547,14 +559,18 @@ where
 
     #[allow(unused_variables)]
     /// Called before a tool is invoked.
+    ///
+    /// # Returns
+    /// - `Ok(())` - Allow tool execution to proceed
+    /// - `Err(message)` - Reject tool execution; `message` will be returned to the LLM as the tool result
     fn on_tool_call(
         &self,
         tool_name: &str,
         tool_call_id: Option<String>,
         args: &str,
         cancel_sig: CancelSignal,
-    ) -> impl Future<Output = ()> + Send {
-        async {}
+    ) -> impl Future<Output = Result<(), String>> + Send {
+        async { Ok(()) }
     }
 
     #[allow(unused_variables)]
