@@ -265,7 +265,7 @@ where
                         .await;
 
                     if cancel_sig.is_cancelled() {
-                        yield Err(StreamingError::Prompt(PromptError::prompt_cancelled(history_snapshot).into()));
+                        yield Err(StreamingError::Prompt(PromptError::prompt_cancelled(history_snapshot, cancel_sig.cancel_reason().unwrap_or("<no reason given>")).into()));
                     }
                 }
 
@@ -312,7 +312,7 @@ where
                                 hook.on_text_delta(&text.text, &last_text_response, cancel_sig.clone()).await;
                                 if cancel_sig.is_cancelled() {
                                     let history_snapshot = chat_history.read().expect("chat_history lock poisoned").clone();
-                                    yield Err(StreamingError::Prompt(PromptError::prompt_cancelled(history_snapshot).into()));
+                                    yield Err(StreamingError::Prompt(PromptError::prompt_cancelled(history_snapshot, cancel_sig.cancel_reason().unwrap_or("<no reason given>")).into()));
                                 }
                             }
                             yield Ok(MultiTurnStreamItem::stream_item(StreamedAssistantContent::Text(text)));
@@ -339,7 +339,7 @@ where
                                     hook.on_tool_call(&tool_call.function.name, tool_call.call_id.clone(), &tool_args, cancel_sig.clone()).await;
                                     if cancel_sig.is_cancelled() {
                                         let history_snapshot = chat_history.read().expect("chat_history lock poisoned").clone();
-                                        return Err(StreamingError::Prompt(PromptError::prompt_cancelled(history_snapshot).into()));
+                                        return Err(StreamingError::Prompt(PromptError::prompt_cancelled(history_snapshot, cancel_sig.cancel_reason().unwrap_or("<no reason given>")).into()));
                                     }
                                 }
 
@@ -382,7 +382,7 @@ where
 
                                     if cancel_sig.is_cancelled() {
                                         let history_snapshot = chat_history.read().expect("chat_history lock poisoned").clone();
-                                        return Err(StreamingError::Prompt(PromptError::prompt_cancelled(history_snapshot).into()));
+                                        return Err(StreamingError::Prompt(PromptError::prompt_cancelled(history_snapshot, cancel_sig.cancel_reason().unwrap_or("<no reason given>")).into()));
                                     }
                                 }
 
@@ -416,15 +416,21 @@ where
 
                                 if cancel_sig.is_cancelled() {
                                     let history_snapshot = chat_history.read().expect("chat_history lock poisoned").clone();
-                                    yield Err(StreamingError::Prompt(PromptError::prompt_cancelled(history_snapshot).into()));
+                                    yield Err(StreamingError::Prompt(PromptError::prompt_cancelled(history_snapshot, cancel_sig.cancel_reason().unwrap_or("<no reason given>")).into()));
                                 }
                             }
                         }
-                        Ok(StreamedAssistantContent::Reasoning(rig::message::Reasoning { reasoning, id, signature })) => {
-                            yield Ok(MultiTurnStreamItem::stream_item(StreamedAssistantContent::Reasoning(rig::message::Reasoning { reasoning, id, signature })));
+                        Ok(StreamedAssistantContent::Reasoning(reasoning)) => {
+                            if let Some(ref hook) = self.hook {
+                                hook.on_reasoning_done(&reasoning, cancel_sig.clone()).await;
+                            }
+                            yield Ok(MultiTurnStreamItem::stream_item(StreamedAssistantContent::Reasoning(reasoning)));
                             did_call_tool = false;
                         },
                         Ok(StreamedAssistantContent::ReasoningDelta { reasoning, id }) => {
+                            if let Some(ref hook) = self.hook {
+                                hook.on_reasoning_delta(&reasoning, cancel_sig.clone()).await;
+                            }
                             yield Ok(MultiTurnStreamItem::stream_item(StreamedAssistantContent::ReasoningDelta { reasoning, id }));
                             did_call_tool = false;
                         },
@@ -641,6 +647,26 @@ where
         tool_call_id: Option<String>,
         args: &str,
         result: &str,
+        cancel_sig: CancelSignal,
+    ) -> impl Future<Output = ()> + Send {
+        async {}
+    }
+
+    #[allow(unused_variables)]
+    /// Called when receiving a reasoning delta (streaming thinking content).
+    fn on_reasoning_delta(
+        &self,
+        delta: &str,
+        cancel_sig: CancelSignal,
+    ) -> impl Future<Output = ()> + Send {
+        async {}
+    }
+
+    #[allow(unused_variables)]
+    /// Called when a reasoning block is complete.
+    fn on_reasoning_done(
+        &self,
+        reasoning: &Reasoning,
         cancel_sig: CancelSignal,
     ) -> impl Future<Output = ()> + Send {
         async {}
