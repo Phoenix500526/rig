@@ -4,7 +4,7 @@
 
 use crate::{
     completion::CompletionModel,
-    message::Message,
+    message::{Message, Reasoning},
     wasm_compat::{WasmCompatSend, WasmCompatSync},
 };
 
@@ -85,6 +85,16 @@ where
         _prompt: &Message,
         _response: &<M as CompletionModel>::StreamingResponse,
     ) -> impl Future<Output = HookAction> + Send {
+        async { HookAction::cont() }
+    }
+
+    /// Called when receiving a reasoning delta (streaming thinking content).
+    fn on_reasoning_delta(&self, _delta: &str) -> impl Future<Output = HookAction> + Send {
+        async { HookAction::cont() }
+    }
+
+    /// Called when a reasoning block is complete.
+    fn on_reasoning_done(&self, _reasoning: &Reasoning) -> impl Future<Output = HookAction> + Send {
         async { HookAction::cont() }
     }
 }

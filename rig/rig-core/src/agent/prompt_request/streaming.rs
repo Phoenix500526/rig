@@ -612,6 +612,11 @@ where
                             // OpenAI Responses API requires reasoning items to be sent back
                             // alongside function_call items in multi-turn conversations.
                             merge_reasoning_blocks(&mut accumulated_reasoning, &reasoning);
+                            if let Some(ref hook) = self.hook &&
+                                let HookAction::Terminate { reason } = hook.on_reasoning_done(&reasoning).await {
+                                    yield Err(cancelled_prompt_error(&chat_history, reason).await);
+                                    break 'outer;
+                            }
                             yield Ok(MultiTurnStreamItem::stream_item(StreamedAssistantContent::Reasoning(reasoning)));
                         },
                         Ok(StreamedAssistantContent::ReasoningDelta { reasoning, id }) => {
@@ -621,6 +626,11 @@ where
                             pending_reasoning_delta_text.push_str(&reasoning);
                             if pending_reasoning_delta_id.is_none() {
                                 pending_reasoning_delta_id = id.clone();
+                            }
+                            if let Some(ref hook) = self.hook &&
+                                let HookAction::Terminate { reason } = hook.on_reasoning_delta(&reasoning).await {
+                                    yield Err(cancelled_prompt_error(&chat_history, reason).await);
+                                    break 'outer;
                             }
                             yield Ok(MultiTurnStreamItem::stream_item(StreamedAssistantContent::ReasoningDelta { reasoning, id }));
                         },
