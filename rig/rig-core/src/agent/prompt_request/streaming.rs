@@ -299,6 +299,7 @@ where
 
                 let mut tool_calls = vec![];
                 let mut tool_results = vec![];
+                did_call_tool = false;
 
                 while let Some(content) = stream.next().await {
                     match content {
@@ -316,7 +317,7 @@ where
                                 }
                             }
                             yield Ok(MultiTurnStreamItem::stream_item(StreamedAssistantContent::Text(text)));
-                            did_call_tool = false;
+                            // Text content does not cancel a tool call in this turn.
                         },
                         Ok(StreamedAssistantContent::ToolCall(tool_call)) => {
                             let tool_span = info_span!(
@@ -437,14 +438,14 @@ where
                                 hook.on_reasoning_done(&reasoning, cancel_sig.clone()).await;
                             }
                             yield Ok(MultiTurnStreamItem::stream_item(StreamedAssistantContent::Reasoning(reasoning)));
-                            did_call_tool = false;
+                            // Reasoning content does not cancel a tool call in this turn.
                         },
                         Ok(StreamedAssistantContent::ReasoningDelta { reasoning, id }) => {
                             if let Some(ref hook) = self.hook {
                                 hook.on_reasoning_delta(&reasoning, cancel_sig.clone()).await;
                             }
                             yield Ok(MultiTurnStreamItem::stream_item(StreamedAssistantContent::ReasoningDelta { reasoning, id }));
-                            did_call_tool = false;
+                            // Reasoning content does not cancel a tool call in this turn.
                         },
                         Ok(StreamedAssistantContent::Final(final_resp)) => {
                             if let Some(usage) = final_resp.token_usage() { aggregated_usage += usage; };
